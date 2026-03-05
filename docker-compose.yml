@@ -1,0 +1,14 @@
+services:
+  umbra:
+    build: .
+    ports:
+      - "${UMBRA_PORT:-8400}:8400"
+    environment:
+      - CI1T_API_KEY=${CI1T_API_KEY}
+      - CI1T_SLACK_WEBHOOK=${CI1T_SLACK_WEBHOOK:-}
+      - CI1T_SMTP_PASS=${CI1T_SMTP_PASS:-}
+      - CI1T_TWILIO_SID=${CI1T_TWILIO_SID:-}
+      - CI1T_TWILIO_TOKEN=${CI1T_TWILIO_TOKEN:-}
+    volumes:
+      - ./umbra.yml:/app/umbra.yml:ro
+    restart: unless-stopped

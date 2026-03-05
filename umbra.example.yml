@@ -1,0 +1,67 @@
+# Umbra configuration
+# Copy to umbra.yml and customize
+
+# -- Server --
+port: 8400
+host: "0.0.0.0"
+
+# -- CI-1T API --
+# Get your key at https://collapseindex.org/dashboard
+# Can also use CI1T_API_KEY env var instead of putting it here
+api_key: ""
+api_url: "https://collapseindex.org/api"
+
+# -- Policy --
+# "enforce" = gate/block at AL3+
+# "monitor" = log everything, block nothing
+policy: "monitor"
+
+# -- Fleet session --
+episode_size: 3  # scores per episode (2-8, default 3)
+
+# -- Risk map (optional overrides) --
+# Defaults are sensible for most agent frameworks.
+# Only include action types you want to override.
+# risk_map:
+#   file_read: 0.05
+#   file_write: 0.25
+#   terminal_exec: 0.50
+#   credential_access: 0.90
+#   unknown: 0.50
+
+# -- Alerts --
+# All alert channels are opt-in. Nothing fires unless configured.
+alerts:
+  # When to alert (minimum AL that triggers an alert)
+  # Options: AL2, AL3, AL4, ghost
+  min_level: "AL3"
+
+  # -- Slack --
+  # slack:
+  #   webhook_url: "https://hooks.slack.com/services/T.../B.../xxx"
+  #   channel: "#ci1t-alerts"       # optional override
+
+  # -- Email (SMTP) --
+  # email:
+  #   smtp_host: "smtp.gmail.com"
+  #   smtp_port: 587
+  #   smtp_user: "you@gmail.com"
+  #   smtp_pass: ""                 # or use CI1T_SMTP_PASS env var
+  #   from_addr: "umbra@yourdomain.com"
+  #   to_addrs:
+  #     - "ops@yourdomain.com"
+
+  # -- SMS (Twilio) --
+  # sms:
+  #   account_sid: ""               # or CI1T_TWILIO_SID env var
+  #   auth_token: ""                # or CI1T_TWILIO_TOKEN env var
+  #   from_number: "+15551234567"
+  #   to_numbers:
+  #     - "+15559876543"
+
+# -- Credits --
+credits:
+  # Warn when credits drop below this threshold
+  low_warning: 100
+  # Check balance every N rounds (0 = disabled)
+  check_interval: 10
