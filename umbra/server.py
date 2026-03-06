@@ -7,6 +7,8 @@ Endpoints:
     GET  /status/{agent}  Status for a single agent.
     GET  /health    Liveness check.
     DELETE /sessions/{agent}  Reset an agent's monitoring session.
+    POST /consensus     Effective authority level for a group of agents.
+    GET  /causal/{agent}  Upstream causal chain for an agent.
 """
 
 from __future__ import annotations
@@ -28,6 +30,9 @@ import httpx
 from . import __version__
 from .alerts import AlertDispatcher
 from .config import UmbraConfig, sanitize_agent_name
+from .multi import (
+    CausalGraph, InfluenceGate, compute_cascade_penalties, compute_consensus_al,
+)
 from .policy import PolicyGate, PolicyResult
 from .scorer import Q16_MAX
 from .sessions import SessionManager
@@ -68,6 +73,14 @@ def _validate_check_body(body: dict[str, Any]) -> str | None:
     if agent and (not isinstance(agent, str) or len(agent) > 100):
         return "'agent' must be a string up to 100 chars"
 
+    # Validate triggered_by (optional, string)
+    triggered_by = body.get("triggered_by")
+    if triggered_by is not None:
+        if not isinstance(triggered_by, str) or len(triggered_by) > 100:
+            return "'triggered_by' must be a string up to 100 chars"
+        if any(ord(c) < 32 for c in triggered_by):
+            return "'triggered_by' must not contain control characters"
+
     return None
 
 
@@ -90,6 +103,9 @@ class UmbraServer:
         self.sessions.risk_config = RiskConfig(risk_map=dict(config.risk_map))
 
         self.alerts = AlertDispatcher(config.alerts)
+        self.multi_enabled = config.multi_agent.enabled
+        self.causal_graph = CausalGraph(edge_ttl=config.multi_agent.causal_edge_ttl)
+        self._multi_cfg = config.multi_agent
         self._start_time = time.time()
         self._request_count = 0
         self._credit_warning_sent = False
@@ -108,6 +124,8 @@ class UmbraServer:
             Route("/sessions/{agent:path}", self._handle_delete_session, methods=["DELETE"]),
             Route("/decisions", self._handle_decisions, methods=["GET"]),
             Route("/episodes", self._handle_episodes, methods=["GET"]),
+            Route("/consensus", self._handle_consensus, methods=["POST"]),
+            Route("/causal/{agent:path}", self._handle_causal, methods=["GET"]),
         ]
 
         app = Starlette(
@@ -150,6 +168,34 @@ class UmbraServer:
         action = body.get("action", "unknown")
         is_escalation = bool(body.get("escalation", False))
         raw_score = body.get("score")
+        triggered_by = body.get("triggered_by")
+        if triggered_by:
+            triggered_by = sanitize_agent_name(triggered_by)
+
+        # Multi-agent: influence gating
+        if triggered_by and self.multi_enabled and self._multi_cfg.influence_gating:
+            trigger_status = await self.sessions.get_status(triggered_by)
+            if trigger_status:
+                trigger_ep = trigger_status.get("last_episode", {})
+                trigger_al = trigger_ep.get("al_out", 4)
+                risk = self.sessions.risk_config.risk_map.get(action, 0.50)
+                allowed, reason = InfluenceGate.check(
+                    triggering_al=trigger_al,
+                    target_action_risk=risk,
+                    policy_enabled=self.config.enforce,
+                )
+                if not allowed:
+                    return JSONResponse({
+                        "decision": "block",
+                        "agent": agent,
+                        "triggered_by": triggered_by,
+                        "influence_gated": True,
+                        "reason": reason,
+                    })
+
+        # Multi-agent: record causal edge
+        if triggered_by and self.multi_enabled:
+            self.causal_graph.record(agent_from=triggered_by, agent_to=agent)
 
         # Score + buffer + maybe push round
         try:
@@ -180,6 +226,10 @@ class UmbraServer:
 
         # We got a round result -- apply policy
         result = self._apply_policy(agent, round_result)
+
+        # Multi-agent: cascade propagation
+        if self.multi_enabled and self._multi_cfg.cascade:
+            asyncio.create_task(self._cascade_propagate(agent, result.ci_raw))
 
         # Log decision + episode
         result_dict = result.to_dict()
@@ -296,6 +346,7 @@ class UmbraServer:
         deleted = await self.sessions.delete_session(agent)
         if not deleted:
             return _error(404, f"No active session for agent '{agent}'")
+        self.causal_graph.clear_agent(agent)
         return JSONResponse({"deleted": True, "agent": agent})
 
     # -- GET /decisions --
@@ -320,6 +371,58 @@ class UmbraServer:
             items = [d for d in items if d["agent"] == agent_filter]
         items.reverse()
         return JSONResponse({"episodes": items[:100]})
+
+    # -- POST /consensus --
+
+    async def _handle_consensus(self, request: Request) -> Response:
+        """Compute effective authority level for a group of agents.
+
+        The weakest link determines the group's authority.
+        """
+        body = await self._parse_body(request)
+        if isinstance(body, Response):
+            return body
+
+        agents = body.get("agents")
+        if not agents or not isinstance(agents, list):
+            return _error(400, "'agents' must be a non-empty list of agent names")
+        if len(agents) > 100:
+            return _error(400, "'agents' list too large (max 100)")
+
+        agent_als: dict[str, int] = {}
+        for name in agents:
+            if not isinstance(name, str):
+                continue
+            name = sanitize_agent_name(name)
+            status = await self.sessions.get_status(name)
+            if status:
+                ep = status.get("last_episode", {})
+                agent_als[name] = ep.get("al_out", 4)
+            else:
+                # Unknown agent treated as AL4 (no trust)
+                agent_als[name] = 4
+
+        effective_al, explanation = compute_consensus_al(agent_als)
+
+        return JSONResponse({
+            "effective_al": effective_al,
+            "explanation": explanation,
+            "agents": {name: {"al": al} for name, al in agent_als.items()},
+        })
+
+    # -- GET /causal/{agent} --
+
+    async def _handle_causal(self, request: Request) -> Response:
+        """Return the upstream causal chain for an agent."""
+        agent = request.path_params["agent"]
+        upstream = self.causal_graph.get_upstream(agent)
+        return JSONResponse({
+            "agent": agent,
+            "upstream": [
+                {"agent": name, "hops": hops}
+                for name, hops in upstream
+            ],
+        })
 
     # -- Internal helpers --
 
@@ -395,3 +498,33 @@ class UmbraServer:
                 result.credits_remaining, self.config.credits.low_warning,
             )
             await self.alerts.send_credit_warning(result.credits_remaining, result.agent)
+
+    async def _cascade_propagate(self, agent: str, ci_raw: int) -> None:
+        """Propagate instability backward through the causal graph.
+
+        When an agent goes unstable, a penalty score is injected into
+        upstream agents' score buffers, attenuated by hop distance.
+        """
+        upstream = self.causal_graph.get_upstream(
+            agent, max_hops=self._multi_cfg.cascade_max_hops
+        )
+        if not upstream:
+            return
+
+        penalties = compute_cascade_penalties(ci_raw, upstream)
+        for target_agent, penalty_q16 in penalties:
+            try:
+                # Inject penalty score directly into the target's buffer
+                await self.sessions.check(
+                    agent=target_agent,
+                    action="_cascade_penalty",
+                    score=penalty_q16,
+                )
+                logger.info(
+                    "Cascade penalty: %s -> %s (score=%d)",
+                    agent, target_agent, penalty_q16,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to propagate cascade to %s: %s", target_agent, e
+                )

@@ -107,6 +107,17 @@ class CreditsConfig:
     check_interval: int = DEFAULT_CREDIT_CHECK_INTERVAL
 
 
+@dataclass
+class MultiAgentConfig:
+    """Multi-agent coordination settings."""
+    enabled: bool = False
+    cascade: bool = True
+    influence_gating: bool = True
+    cascade_decay: float = 0.5
+    cascade_max_hops: int = 4
+    causal_edge_ttl: int = 600
+
+
 def mask_key(key: str) -> str:
     """Mask a secret, showing only last 4 chars. Rule #5: Mask Secrets in Logs."""
     if not key or len(key) < 8:
@@ -144,6 +155,7 @@ class UmbraConfig:
     risk_map: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_RISK_MAP))
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     credits: CreditsConfig = field(default_factory=CreditsConfig)
+    multi_agent: MultiAgentConfig = field(default_factory=MultiAgentConfig)
 
     @property
     def enforce(self) -> bool:
@@ -269,6 +281,18 @@ def load_config(
         low_warning=credits_raw.get("low_warning", DEFAULT_LOW_CREDIT_WARNING),
         check_interval=credits_raw.get("check_interval", DEFAULT_CREDIT_CHECK_INTERVAL),
     )
+
+    # Multi-agent
+    multi_raw = raw.get("multi_agent", {}) or {}
+    if multi_raw:
+        cfg.multi_agent = MultiAgentConfig(
+            enabled=multi_raw.get("enabled", False),
+            cascade=multi_raw.get("cascade", True),
+            influence_gating=multi_raw.get("influence_gating", True),
+            cascade_decay=multi_raw.get("cascade_decay", 0.5),
+            cascade_max_hops=multi_raw.get("cascade_max_hops", 4),
+            causal_edge_ttl=multi_raw.get("causal_edge_ttl", 600),
+        )
 
     # CLI overrides (highest priority)
     if cli_overrides:

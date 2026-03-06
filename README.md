@@ -5,7 +5,7 @@
   <br />
 </p>
 
-**Version:** 0.3.0 | **License:** [ELv2](LICENSE) | **Last Updated:** March 5, 2026
+**Version:** 0.4.0 | **License:** [ELv2](LICENSE) | **Last Updated:** March 6, 2026
 
 ---
 
@@ -163,6 +163,50 @@ DELETE /sessions/{agent}
 
 Deletes the fleet session on CI-1T and clears all local state for that agent.
 
+### Consensus authority
+
+```
+POST /consensus
+```
+
+When multiple agents collaborate on a decision, the effective authority is the **minimum AL** of all contributors. One unstable agent drags down the whole group.
+
+```json
+{ "agents": ["coding-agent", "research-agent", "deploy-agent"] }
+```
+
+**Response:**
+
+```json
+{
+  "effective_al": 3,
+  "explanation": "AL3 (limited by deploy-agent)",
+  "agents": {
+    "coding-agent": { "al": 1 },
+    "research-agent": { "al": 0 },
+    "deploy-agent": { "al": 3 }
+  }
+}
+```
+
+### Causal chain
+
+```
+GET /causal/{agent}
+```
+
+Returns the upstream agents that triggered actions in this agent (via `triggered_by`).
+
+```json
+{
+  "agent": "deploy-agent",
+  "upstream": [
+    { "agent": "coding-agent", "hops": 1 },
+    { "agent": "manager-agent", "hops": 2 }
+  ]
+}
+```
+
 ---
 
 ## Risk Map
@@ -206,6 +250,76 @@ GET /episodes?agent=my-agent      Episodes for one agent
 ```
 
 All data is in-memory and resets on restart.
+
+---
+
+## Multi-Agent Coordination
+
+> **Experimental.** This feature is new in v0.4.0. The API surface (field names, endpoint behavior, cascade math) may change in future releases based on real-world usage. Causal graphs and cascade penalties are held in-memory and reset on restart. Not yet battle-tested in high-throughput production environments. If you run into issues, please report them.
+
+When you have multiple agents working together, Umbra can track causal relationships and enforce cross-agent governance. Enable it in `umbra.yml`:
+
+```yaml
+multi_agent:
+  enabled: true
+```
+
+Three features, all opt-in:
+
+### Influence Gating
+
+Agent A at AL3 cannot trigger a high-risk action in Agent B. Authority does not transfer upward. Pass `triggered_by` on `/check`:
+
+```python
+requests.post("http://localhost:8400/check", json={
+    "agent": "deploy-bot",
+    "action": "credential_access",
+    "triggered_by": "research-bot"  # Is research-bot trusted enough?
+})
+```
+
+If the triggering agent lacks authority, Umbra blocks with `influence_gated: true`.
+
+| Action risk | Required triggering AL |
+|---|---|
+| High (> 0.6) | AL 0-1 |
+| Medium (0.3-0.6) | AL 0-2 |
+| Low (< 0.3) | Any AL |
+
+### Cascade Propagation
+
+When Agent C goes unstable and was triggered by Agent A (via Agent B), a penalty score propagates backward through the causal chain:
+
+- Agent B gets 50% of Agent C's instability
+- Agent A gets 25% (attenuated by hop distance)
+- Max 4 hops, 50% decay per hop
+
+This holds upstream agents accountable for bad delegation without nuking the whole system.
+
+### Consensus Authority
+
+When multiple agents collaborate, the effective authority is the **minimum AL** of all participants. One unstable agent drags down the group:
+
+```python
+requests.post("http://localhost:8400/consensus", json={
+    "agents": ["coding-bot", "review-bot", "deploy-bot"]
+})
+# -> {"effective_al": 3, "explanation": "AL3 (limited by deploy-bot)"}
+```
+
+Check this before executing a group decision. If one agent is untrusted, wait for it to stabilize or exclude it.
+
+### Configuration
+
+```yaml
+multi_agent:
+  enabled: true              # Enable multi-agent coordination (default: false)
+  cascade: true              # Enable cascade propagation (default: true)
+  influence_gating: true     # Enable influence gating (default: true)
+  cascade_decay: 0.5         # Attenuation per hop (default: 0.5)
+  cascade_max_hops: 4        # Max causal chain depth (default: 4)
+  causal_edge_ttl: 600       # Seconds before causal edges expire (default: 600)
+```
 
 ---
 
@@ -295,6 +409,15 @@ alerts:
 credits:
   low_warning: 100               # Alert when credits drop below this
   check_interval: 10             # Check credits every N episodes
+
+# Multi-agent coordination (disabled by default)
+multi_agent:
+  enabled: false
+  cascade: true                  # Propagate instability to upstream agents
+  influence_gating: true         # Block cross-agent actions above triggering agent's AL
+  cascade_decay: 0.5             # Attenuation per hop (50%)
+  cascade_max_hops: 4            # Max causal chain depth
+  causal_edge_ttl: 600           # Seconds before causal edges expire
 ```
 
 ### Environment Variables
@@ -373,9 +496,9 @@ Report vulnerabilities to ask@collapseindex.org (not public issues).
 umbra/
   __init__.py       config.py       scorer.py       alerts.py
   __main__.py       server.py       policy.py       setup.py
-                    sessions.py
+                    sessions.py     multi.py
 tests/
-  test_core.py      test_server.py
+  test_core.py      test_server.py  test_multi.py
 umbra.example.yml   Dockerfile      docker-compose.yml
 pyproject.toml      requirements.txt
 ```
@@ -383,6 +506,13 @@ pyproject.toml      requirements.txt
 ---
 
 ## Changelog
+
+### v0.4.0 (2026-03-06)
+- Multi-agent coordination: influence gating, cascade propagation, consensus authority
+- New endpoints: `POST /consensus`, `GET /causal/{agent}`
+- New `triggered_by` field on `/check` for declaring causal relationships
+- `multi_agent` config section in `umbra.yml` (disabled by default)
+- 36 new tests (103 total)
 
 ### v0.3.0 (2026-03-05)
 - Architecture diagram in README
