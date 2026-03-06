@@ -268,7 +268,7 @@ policy: "monitor"
 # Lower = faster reactions but noisier, higher = smoother but slower to catch drift
 episode_size: 3
 
-# Override risk scores
+# Override risk scores (0.0 = no risk, 1.0 = maximum risk)
 risk_map:
   terminal_exec: 0.70
   file_read: 0.02
