@@ -13,32 +13,11 @@
 
 Umbra is a lightweight HTTP server that sits between your AI agent and the actions it wants to take. Before your agent does anything -- run a command, send a message, delete a file -- it asks Umbra first. Umbra scores the risk, tracks behavioral drift over time, and tells your agent: **go ahead**, **be careful**, **wait for a human**, or **stop**.
 
-It works with any agent framework (CrewAI, AutoGen, LangGraph, Claude Code, custom) -- if your agent can make an HTTP call, it can use Umbra.
+It works with any agent framework (CrewAI, AutoGen, LangGraph, OpenClaw, Claude Code, custom) -- if your agent can make an HTTP call, it can use Umbra.
 
-```
-                        ┌─────────────────────────┐
-                        │       Your Agent         │
-                        └────────────┬────────────┘
-                                     │ POST /check
-                                     ▼
-                        ┌─────────────────────────┐
-                        │         Umbra            │
-                        │  ┌─────┐ ┌──────────┐   │
-                        │  │Score│ │ Episodes  │   │
-                        │  │ Map │ │ (buffer)  │   │
-                        │  └──┬──┘ └─────┬────┘   │
-                        └─────┼──────────┼────────┘
-                              │          │ batch
-                              │          ▼
-                        ┌─────────────────────────┐
-                        │       CI-1T API          │
-                        │  Collapse Index scoring  │
-                        │  + ghost detection       │
-                        └────────────┬────────────┘
-                                     │
-                                     ▼
-                          ALLOW / WARN / GATE / BLOCK
-```
+<p align="center">
+  <img src="flow.png" alt="Umbra architecture" width="900" />
+</p>
 
 ## 30-Second Integration
 
