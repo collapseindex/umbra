@@ -260,10 +260,11 @@ host: "0.0.0.0"
 api_key: ""
 api_url: "https://collapseindex.org/api"
 
-# "monitor" or "enforce"
+# "monitor" = log everything, never block (safe for testing)
+# "enforce" = gate at AL3, block at AL4 and confirmed ghosts (production)
 policy: "monitor"
 
-# Scores per episode (2-8)
+# Actions per evaluation round (2-8)
 episode_size: 3
 
 # Override risk scores
@@ -273,7 +274,7 @@ risk_map:
 
 # Alerts (all opt-in)
 alerts:
-  min_level: "AL3"
+  min_level: "AL3"              # Minimum authority level to trigger alerts
   slack:
     webhook_url: "https://hooks.slack.com/services/..."
   email:
@@ -291,8 +292,8 @@ alerts:
 
 # Credit monitoring
 credits:
-  low_warning: 100
-  check_interval: 10
+  low_warning: 100               # Alert when credits drop below this
+  check_interval: 10             # Check credits every N episodes
 ```
 
 ### Environment Variables
