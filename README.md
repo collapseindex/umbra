@@ -264,7 +264,8 @@ api_url: "https://collapseindex.org/api"
 # "enforce" = gate at AL3, block at AL4 and confirmed ghosts (production)
 policy: "monitor"
 
-# Actions per evaluation round (2-8)
+# Actions per evaluation round (2-8, default: 3)
+# Lower = faster reactions but noisier, higher = smoother but slower to catch drift
 episode_size: 3
 
 # Override risk scores
