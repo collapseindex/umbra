@@ -5,7 +5,7 @@
   <br />
 </p>
 
-**Version:** 0.2.0 | **License:** [ELv2](LICENSE) | **Last Updated:** March 5, 2026
+**Version:** 0.3.0 | **License:** [ELv2](LICENSE) | **Last Updated:** March 5, 2026
 
 ---
 
@@ -13,12 +13,50 @@
 
 Umbra is a lightweight HTTP server that sits between your AI agent and the actions it wants to take. Before your agent does anything -- run a command, send a message, delete a file -- it asks Umbra first. Umbra scores the risk, tracks behavioral drift over time, and tells your agent: **go ahead**, **be careful**, **wait for a human**, or **stop**.
 
-It works with any agent framework (CrewAI, AutoGen, LangGraph, OpenClaw, Claude Code, custom) -- if your agent can make an HTTP call, it can use Umbra.
+It works with any agent framework (CrewAI, AutoGen, LangGraph, Claude Code, custom) -- if your agent can make an HTTP call, it can use Umbra.
 
 ```
-Your Agent --> POST /check --> Umbra --> CI-1T API
-          <-- { decision: "allow" } <--|
+                        ┌─────────────────────────┐
+                        │       Your Agent         │
+                        └────────────┬────────────┘
+                                     │ POST /check
+                                     ▼
+                        ┌─────────────────────────┐
+                        │         Umbra            │
+                        │  ┌─────┐ ┌──────────┐   │
+                        │  │Score│ │ Episodes  │   │
+                        │  │ Map │ │ (buffer)  │   │
+                        │  └──┬──┘ └─────┬────┘   │
+                        └─────┼──────────┼────────┘
+                              │          │ batch
+                              │          ▼
+                        ┌─────────────────────────┐
+                        │       CI-1T API          │
+                        │  Collapse Index scoring  │
+                        │  + ghost detection       │
+                        └────────────┬────────────┘
+                                     │
+                                     ▼
+                          ALLOW / WARN / GATE / BLOCK
 ```
+
+## 30-Second Integration
+
+```python
+import requests
+
+def safe_exec(agent, action):
+    r = requests.post("http://localhost:8400/check", json={
+        "agent": agent, "action": action
+    }).json()
+    if r["decision"] in ("gate", "block"):
+        raise RuntimeError(f"Umbra blocked: {r['decision']}")
+    return r
+```
+
+That's it. Your agent asks Umbra before every action. Umbra says go or stop.
+
+---
 
 ## Install
 
@@ -48,13 +86,13 @@ That's it. Umbra is now listening on `http://localhost:8400`.
 
 ## How Does It Decide?
 
-Every action your agent sends gets a risk score. Umbra batches scores into episodes and sends them to [CI-1T](https://collapseindex.org) for evaluation. CI-1T returns:
+The simple version:
 
-- **CI** (Collapse Index) -- how unstable your agent's behavior is
-- **AL** (Authority Level) -- how much trust to give
-- **Ghost flags** -- whether the agent is suspiciously consistent (hiding errors)
+```
+risk score --> threshold --> ALLOW / WARN / GATE / BLOCK
+```
 
-Umbra maps the AL to a decision:
+The full version: every action gets a risk score (from the risk map below). Umbra batches scores into episodes and sends them to [CI-1T](https://collapseindex.org) for evaluation. CI-1T returns a **Collapse Index** (how unstable your agent's behavior is) and an **Authority Level** (how much trust to give). Umbra maps that to a decision:
 
 | AL | Meaning | Decision | Your agent should... |
 |----|---------|----------|---------------------|
@@ -63,6 +101,8 @@ Umbra maps the AL to a decision:
 | 3 | Low trust | **GATE** | Pause and wait for human approval |
 | 4 | No trust | **BLOCK** | Stop immediately |
 | -- | Ghost detected | **BLOCK** | Stop immediately |
+
+Ghost detection catches agents that are suspiciously consistent -- stable, confident, but hiding errors.
 
 **Policy modes:**
 - `monitor` -- log everything, never block (good for testing)
@@ -161,6 +201,32 @@ Umbra ships with 17 built-in action types. You can override any of them in `umbr
 | `delete_file` | 0.40 | | `credential_access` | 0.90 |
 | `install_package` | 0.45 | | `self_modify` | 0.90 |
 | | | | `external_upload` | 0.90 |
+
+**Custom actions:** Use dotted namespaces for actions not in the default map. Anything Umbra doesn't recognize gets the `unknown` risk (0.50).
+
+```yaml
+# umbra.yml
+risk_map:
+  cloud.deploy: 0.80
+  db.query: 0.35
+  git.push: 0.45
+  browser.click: 0.15
+```
+
+---
+
+## Observability
+
+Umbra tracks every decision and episode. Query them at runtime:
+
+```
+GET /decisions                    Last 100 decisions across all agents
+GET /decisions?agent=my-agent     Decisions for one agent
+GET /episodes                     Episode history (CI scores, ghost flags)
+GET /episodes?agent=my-agent      Episodes for one agent
+```
+
+All data is in-memory and resets on restart.
 
 ---
 
@@ -336,6 +402,15 @@ pyproject.toml      requirements.txt
 ---
 
 ## Changelog
+
+### v0.3.0 (2026-03-05)
+- Architecture diagram in README
+- 30-second integration snippet
+- Simplified how-it-works mental model (risk score -> threshold -> decision)
+- Dotted action namespaces (`cloud.deploy`, `db.query`) with domain fallback
+- Observability endpoints: `GET /decisions` and `GET /episodes` with agent filtering
+- Custom actions section in docs
+- 8 new tests (67 total)
 
 ### v0.2.0 (2026-03-05)
 - Renamed project from ci1t-gate to **Umbra**

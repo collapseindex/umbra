@@ -37,14 +37,22 @@ class RiskConfig:
     def score(self, action_type: str, is_escalation: bool = False) -> int:
         """Convert an action type to a Q0.16 score.
 
+        Supports dotted namespaces (e.g. "cloud.deploy", "db.query").
+        Lookup order: exact match -> domain wildcard (e.g. "cloud") -> "unknown".
+
         Args:
-            action_type: Normalized action type string (e.g. "file_read", "terminal_exec").
+            action_type: Action type string (e.g. "file_read", "cloud.deploy").
             is_escalation: Whether this action is flagged as dangerous.
 
         Returns:
             u16 integer (0-65535).
         """
-        base = self.risk_map.get(action_type, self.risk_map.get("unknown", 0.50))
+        base = self.risk_map.get(action_type)
+        if base is None and "." in action_type:
+            domain = action_type.split(".")[0]
+            base = self.risk_map.get(domain)
+        if base is None:
+            base = self.risk_map.get("unknown", 0.50)
 
         if is_escalation:
             base = min(1.0, base + self.escalation_boost)

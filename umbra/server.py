@@ -94,6 +94,8 @@ class UmbraServer:
         self._request_count = 0
         self._credit_warning_sent = False
         self._rate_limiter: deque[float] = deque()
+        self._decision_log: deque[dict[str, Any]] = deque(maxlen=500)
+        self._episode_log: deque[dict[str, Any]] = deque(maxlen=500)
 
     def build_app(self) -> Starlette:
         """Build the Starlette ASGI application."""
@@ -104,6 +106,8 @@ class UmbraServer:
             Route("/status/{agent:path}", self._handle_agent_status, methods=["GET"]),
             Route("/health", self._handle_health, methods=["GET"]),
             Route("/sessions/{agent:path}", self._handle_delete_session, methods=["DELETE"]),
+            Route("/decisions", self._handle_decisions, methods=["GET"]),
+            Route("/episodes", self._handle_episodes, methods=["GET"]),
         ]
 
         app = Starlette(
@@ -177,10 +181,32 @@ class UmbraServer:
         # We got a round result -- apply policy
         result = self._apply_policy(agent, round_result)
 
+        # Log decision + episode
+        result_dict = result.to_dict()
+        self._decision_log.append({
+            "agent": agent,
+            "decision": result.decision.value,
+            "al": result.al,
+            "ghost_confirmed": result.ghost_confirmed,
+            "round": result.round_num,
+            "timestamp": time.time(),
+        })
+        self._episode_log.append({
+            "agent": agent,
+            "ci": result_dict["ci"],
+            "ci_ema": result_dict["ci_ema"],
+            "al": result.al,
+            "ghost_suspect": result.ghost_suspect,
+            "ghost_confirmed": result.ghost_confirmed,
+            "round": result.round_num,
+            "decision": result.decision.value,
+            "timestamp": time.time(),
+        })
+
         # Fire alerts in background (don't slow down the response)
         asyncio.create_task(self._maybe_alert(result))
 
-        return JSONResponse(result.to_dict())
+        return JSONResponse(result_dict)
 
     # -- POST /report --
 
@@ -271,6 +297,29 @@ class UmbraServer:
         if not deleted:
             return _error(404, f"No active session for agent '{agent}'")
         return JSONResponse({"deleted": True, "agent": agent})
+
+    # -- GET /decisions --
+
+    async def _handle_decisions(self, request: Request) -> Response:
+        """Return recent policy decisions, optionally filtered by agent."""
+        agent_filter = request.query_params.get("agent")
+        items = list(self._decision_log)
+        if agent_filter:
+            items = [d for d in items if d["agent"] == agent_filter]
+        # Return newest first
+        items.reverse()
+        return JSONResponse({"decisions": items[:100]})
+
+    # -- GET /episodes --
+
+    async def _handle_episodes(self, request: Request) -> Response:
+        """Return recent episode results, optionally filtered by agent."""
+        agent_filter = request.query_params.get("agent")
+        items = list(self._episode_log)
+        if agent_filter:
+            items = [d for d in items if d["agent"] == agent_filter]
+        items.reverse()
+        return JSONResponse({"episodes": items[:100]})
 
     # -- Internal helpers --
 

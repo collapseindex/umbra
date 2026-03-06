@@ -70,6 +70,24 @@ class TestRiskConfig:
         assert rc.risk_map["file_read"] == 0.90
         assert rc.risk_map["custom_action"] == 0.75
 
+    def test_dotted_namespace_exact_match(self):
+        rc = RiskConfig(risk_map={"cloud.deploy": 0.80, "unknown": 0.50})
+        score = rc.score("cloud.deploy")
+        # 0.80 +/- 0.02 jitter -> should be high
+        assert score > Q16_MAX // 2
+
+    def test_dotted_namespace_domain_fallback(self):
+        rc = RiskConfig(risk_map={"cloud": 0.70, "unknown": 0.50})
+        score = rc.score("cloud.deploy")
+        # Falls back to "cloud" domain -> 0.70 +/- 0.02
+        assert score > Q16_MAX // 3
+
+    def test_dotted_namespace_unknown_fallback(self):
+        rc = RiskConfig(risk_map={"unknown": 0.50})
+        score = rc.score("browser.click")
+        # No match for "browser.click" or "browser", falls to unknown 0.50
+        assert Q16_MAX // 4 < score < (Q16_MAX * 3) // 4
+
 
 # ── Policy ──
 

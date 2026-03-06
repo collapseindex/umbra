@@ -137,6 +137,81 @@ class TestDeleteSession:
         assert resp.status_code == 404
 
 
+class TestDecisions:
+    def test_decisions_empty(self, client):
+        resp = client.get("/decisions")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["decisions"] == []
+
+    def test_decisions_populated(self, client, mock_session_check):
+        """After a round result, /decisions should have an entry."""
+        mock_session_check.return_value = {
+            "snapshot": {
+                "nodes": [{
+                    "ci_out": 30000,
+                    "ci_ema_out": 28000,
+                    "al_out": 2,
+                    "ghost_suspect": False,
+                    "ghost_confirmed": False,
+                }]
+            },
+            "round": 1,
+            "credits_remaining": 900,
+        }
+        client.post("/check", json={"action": "file_write", "agent": "obs-test"})
+        resp = client.get("/decisions")
+        data = resp.json()
+        assert len(data["decisions"]) == 1
+        assert data["decisions"][0]["agent"] == "obs-test"
+        assert data["decisions"][0]["decision"] == "warn"
+
+    def test_decisions_agent_filter(self, client, mock_session_check):
+        """Agent query param should filter decisions."""
+        mock_session_check.return_value = {
+            "snapshot": {"nodes": [{"ci_out": 0, "ci_ema_out": 0, "al_out": 0}]},
+            "round": 1, "credits_remaining": 900,
+        }
+        client.post("/check", json={"action": "file_read", "agent": "a1"})
+        client.post("/check", json={"action": "file_read", "agent": "a2"})
+        resp = client.get("/decisions?agent=a1")
+        data = resp.json()
+        assert all(d["agent"] == "a1" for d in data["decisions"])
+
+
+class TestEpisodes:
+    def test_episodes_empty(self, client):
+        resp = client.get("/episodes")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["episodes"] == []
+
+    def test_episodes_populated(self, client, mock_session_check):
+        """After a round result, /episodes should have an entry with CI data."""
+        mock_session_check.return_value = {
+            "snapshot": {
+                "nodes": [{
+                    "ci_out": 45000,
+                    "ci_ema_out": 40000,
+                    "al_out": 3,
+                    "ghost_suspect": True,
+                    "ghost_confirmed": False,
+                }]
+            },
+            "round": 2,
+            "credits_remaining": 800,
+        }
+        client.post("/check", json={"action": "terminal_exec", "agent": "ep-test"})
+        resp = client.get("/episodes")
+        data = resp.json()
+        assert len(data["episodes"]) == 1
+        ep = data["episodes"][0]
+        assert ep["agent"] == "ep-test"
+        assert ep["al"] == 3
+        assert ep["ghost_suspect"] is True
+        assert "ci" in ep
+
+
 # ── Security ──
 
 
