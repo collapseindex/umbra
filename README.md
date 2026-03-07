@@ -5,13 +5,20 @@
   <br />
 </p>
 
-**Version:** 0.4.0 | **License:** [ELv2](LICENSE) | **Last Updated:** March 6, 2026
+**Version:** 0.5.0 | **License:** [ELv2](LICENSE) | **Last Updated:** March 6, 2026
 
 ---
 
 ## What is Umbra?
 
 Umbra is a lightweight HTTP server powered by the [CI-1T](https://collapseindex.org) API that sits between your AI agent and the actions it wants to take. Before your agent does anything -- run a command, send a message, delete a file -- it asks Umbra first. Umbra scores the risk, tracks behavioral drift over time, and tells your agent: **go ahead**, **be careful**, **wait for a human**, or **stop**.
+
+Umbra also ships with two optional modules:
+
+- **Multi-Agent Coordination** -- influence gating, cascade propagation, and consensus authority across multiple agents working together
+- **CI-C1 (Structural Curiosity)** -- background pattern discovery that fingerprints agent behavior and detects when agents start acting alike (or drifting apart) without you having to look
+
+Both are disabled by default and can be turned on in `umbra.yml`.
 
 It works with any agent framework (CrewAI, AutoGen, LangGraph, OpenClaw, Claude Code, custom) -- if your agent can make an HTTP call, it can use Umbra.
 
@@ -207,6 +214,32 @@ Returns the upstream agents that triggered actions in this agent (via `triggered
 }
 ```
 
+### Discoveries (CI-C1)
+
+```
+GET /discoveries?agent=bot-1&limit=20
+```
+
+Returns recent pattern discoveries from the curiosity engine. Only available when `curiosity.enabled: true`.
+
+```json
+{
+  "discoveries": [
+    {
+      "match_type": "cross_agent",
+      "agent_a": "coding-bot",
+      "agent_b": "deploy-bot",
+      "similarity": 0.92,
+      "explanation": "coding-bot and deploy-bot are exhibiting similar behavior (92% match)...",
+      "cycle": 14,
+      "window_a": { "start": 1709721600, "end": 1709722200, "index": 0 },
+      "window_b": { "start": 1709721600, "end": 1709722200, "index": 0 }
+    }
+  ],
+  "cycle_count": 14
+}
+```
+
 ---
 
 ## Risk Map
@@ -323,6 +356,82 @@ multi_agent:
 
 ---
 
+## CI-C1: Curiosity Engine
+
+> **Experimental.** CI-C1 is new in v0.5.0. Behavioral fingerprinting and pattern matching are performed in-memory and reset on restart. Discovery explanations are template-based (no LLM calls). The fingerprint dimensions, similarity math, and cooldown logic may change in future releases.
+
+Traditional monitoring tells you when something goes wrong. CI-C1 tells you when something *looks familiar*. If your coding agent starts behaving like your deploy agent did right before it went unstable last Thursday, CI-C1 catches that. If two agents that shouldn't be related start drifting in lockstep, CI-C1 catches that too. It finds the patterns you didn't know to look for, before they become incidents.
+
+The problem it solves: rule-based detectors only catch what you anticipated. CI-C1 watches behavioral *shape* across time and across agents, surfacing structural similarities that no one wrote a rule for. A single agent running alone gets self-temporal matching (is it repeating a past failure pattern?). A fleet gets cross-agent and cross-temporal matching on top of that.
+
+Works with a single agent or an entire fleet. No configuration beyond `enabled: true`.
+
+Enable it:
+
+```yaml
+curiosity:
+  enabled: true
+```
+
+### How It Works
+
+Every `cycle_interval` seconds (default: 60), CI-C1:
+
+1. **Fingerprints** each agent's recent behavior over a sliding window (default: last 10 episodes). Each fingerprint captures 8 dimensions: mean CI, CI variance, trend (slope), volatility (direction changes), max/min CI, AL transition rate, and ghost rate.
+2. **Compares** fingerprints pairwise using structural similarity (a blend of cosine for shape and euclidean distance for magnitude, so agents at different CI levels don't false-match).
+3. **Surfaces** discoveries above the similarity threshold (default: 0.75).
+
+Three match modes:
+
+| Mode | What it finds | Example |
+|---|---|---|
+| **Self-temporal** | Agent's current behavior matches its own past pattern | "bot-1's current trajectory (89% match) resembles its own pattern from 2h ago" |
+| **Cross-agent** | Two agents exhibiting similar behavior right now | "coding-bot and deploy-bot are behaving similarly (93% match)" |
+| **Cross-temporal** | Agent A now matches Agent B's past pattern | "bot-1's current behavior (85% match) resembles bot-2's pattern from 45m ago" |
+
+Self-temporal skips the immediately previous window (always trivially similar for stable agents) and only compares against windows 2+ back, so it catches *recurrence after change*, not steady-state confirmation.
+
+A cooldown mechanism (default: 5 cycles) prevents the same match from flooding discoveries.
+
+### Query Discoveries
+
+```python
+resp = requests.get("http://localhost:8400/discoveries", params={"agent": "bot-1"})
+for d in resp.json()["discoveries"]:
+    print(f"[{d['match_type']}] {d['explanation']}")
+```
+
+### Configuration
+
+```yaml
+curiosity:
+  enabled: true              # Enable the curiosity engine (default: false)
+  cycle_interval: 60         # Seconds between cycles (default: 60)
+  window_size: 10            # Episodes per fingerprint window (default: 10)
+  history_depth: 20          # Past windows kept per agent (default: 20)
+  similarity_threshold: 0.75 # Minimum cosine similarity (default: 0.75)
+  cooldown_cycles: 5         # Cycles before re-reporting same pair (default: 5)
+```
+
+### The Behavioral Fingerprint
+
+Each window of N episodes produces an 8-value vector:
+
+| Dimension | What it captures |
+|---|---|
+| `mean_ci` | Average CI score (0.0-1.0) |
+| `std_ci` | Score variance within the window |
+| `trend` | Linear slope: negative = improving, positive = degrading |
+| `volatility` | Direction changes / (n-2): 0 = monotone, 1 = zigzag |
+| `max_ci` | Worst CI score in window |
+| `min_ci` | Best CI score in window |
+| `al_changes` | Authority level transitions / n |
+| `ghost_rate` | Fraction of episodes flagged as ghost suspects |
+
+Comparing two fingerprints is 8 multiplies + a square root + a magnitude penalty on 4 dimensions. At 50 agents with 20 historical windows each, the entire matching cycle runs in microseconds.
+
+---
+
 ## Examples
 
 ### Python
@@ -418,6 +527,19 @@ multi_agent:
   cascade_decay: 0.5             # Attenuation per hop (50%)
   cascade_max_hops: 4            # Max causal chain depth
   causal_edge_ttl: 600           # Seconds before causal edges expire
+
+# CI-C1: Curiosity engine (disabled by default)
+curiosity:
+  enabled: false
+  cycle_interval: 60             # Seconds between curiosity cycles
+  window_size: 10                # Episodes per behavioral fingerprint
+  history_depth: 20              # Past windows to keep per agent
+  similarity_threshold: 0.75     # Minimum structural similarity to surface
+  cooldown_cycles: 5             # Cycles before re-reporting same match
+
+# OpenRouter key (optional, for demo scripts)
+# Can also use OPENROUTER_API_KEY env var
+# openrouter_key: "sk-or-..."
 ```
 
 ### Environment Variables
@@ -429,6 +551,7 @@ multi_agent:
 | `CI1T_SMTP_PASS` | `alerts.email.smtp_pass` |
 | `CI1T_TWILIO_SID` | `alerts.sms.account_sid` |
 | `CI1T_TWILIO_TOKEN` | `alerts.sms.auth_token` |
+| `OPENROUTER_API_KEY` | `openrouter_key` (used by demo scripts) |
 
 ---
 
@@ -496,9 +619,12 @@ Report vulnerabilities to ask@collapseindex.org (not public issues).
 umbra/
   __init__.py       config.py       scorer.py       alerts.py
   __main__.py       server.py       policy.py       setup.py
-                    sessions.py     multi.py
+                    sessions.py     multi.py        curiosity.py
 tests/
-  test_core.py      test_server.py  test_multi.py
+  test_core.py      test_server.py  test_multi.py   test_curiosity.py
+scripts/
+  demo_curiosity.py               # Multi-agent CI-C1 demo
+  demo_openrouter.py              # Live LLM agent demo (Claude via OpenRouter)
 umbra.example.yml   Dockerfile      docker-compose.yml
 pyproject.toml      requirements.txt
 ```
@@ -506,6 +632,20 @@ pyproject.toml      requirements.txt
 ---
 
 ## Changelog
+
+### v0.5.0 (2026-03-06)
+- CI-C1: Structural Curiosity Engine. Background pattern discovery across agent behavioral trajectories
+- 8-dimensional behavioral fingerprinting (mean CI, variance, trend, volatility, max/min, AL changes, ghost rate)
+- Three match modes: self-temporal, cross-agent, cross-temporal
+- Structural similarity: 40% cosine (shape) + 60% magnitude penalty so agents at different CI levels don't false-match
+- Cooldown-based dedup to prevent discovery flooding
+- New endpoint: `GET /discoveries`
+- `curiosity` config section in `umbra.yml` (disabled by default)
+- `openrouter_key` config field for live LLM demo scripts
+- OpenRouter demo script: test real LLMs (Claude Sonnet 4) through Umbra's gate
+- 50 new tests (153 total)
+- Security audit: sanitized all path/query params, body size validation on raw bytes before JSON parse, removed error info disclosure, default example host to 127.0.0.1
+- Passed bandit, flake8, pip-audit (0 findings)
 
 ### v0.4.0 (2026-03-06)
 - Multi-agent coordination: influence gating, cascade propagation, consensus authority

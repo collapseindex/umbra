@@ -118,6 +118,17 @@ class MultiAgentConfig:
     causal_edge_ttl: int = 600
 
 
+@dataclass
+class CuriosityConfig:
+    """CI-C1 curiosity engine settings."""
+    enabled: bool = False
+    cycle_interval: int = 60
+    window_size: int = 10
+    history_depth: int = 20
+    similarity_threshold: float = 0.75
+    cooldown_cycles: int = 5
+
+
 def mask_key(key: str) -> str:
     """Mask a secret, showing only last 4 chars. Rule #5: Mask Secrets in Logs."""
     if not key or len(key) < 8:
@@ -156,6 +167,7 @@ class UmbraConfig:
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     credits: CreditsConfig = field(default_factory=CreditsConfig)
     multi_agent: MultiAgentConfig = field(default_factory=MultiAgentConfig)
+    curiosity: CuriosityConfig = field(default_factory=CuriosityConfig)
 
     @property
     def enforce(self) -> bool:
@@ -292,6 +304,18 @@ def load_config(
             cascade_decay=multi_raw.get("cascade_decay", 0.5),
             cascade_max_hops=multi_raw.get("cascade_max_hops", 4),
             causal_edge_ttl=multi_raw.get("causal_edge_ttl", 600),
+        )
+
+    # Curiosity (CI-C1)
+    curiosity_raw = raw.get("curiosity", {}) or {}
+    if curiosity_raw:
+        cfg.curiosity = CuriosityConfig(
+            enabled=curiosity_raw.get("enabled", False),
+            cycle_interval=curiosity_raw.get("cycle_interval", 60),
+            window_size=curiosity_raw.get("window_size", 10),
+            history_depth=curiosity_raw.get("history_depth", 20),
+            similarity_threshold=curiosity_raw.get("similarity_threshold", 0.75),
+            cooldown_cycles=curiosity_raw.get("cooldown_cycles", 5),
         )
 
     # CLI overrides (highest priority)

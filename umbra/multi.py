@@ -24,7 +24,6 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
 
 from .scorer import Q16_MAX
 

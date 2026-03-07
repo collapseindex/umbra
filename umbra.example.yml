@@ -3,7 +3,7 @@
 
 # -- Server --
 port: 8400
-host: "0.0.0.0"
+host: "127.0.0.1"  # Change to "0.0.0.0" to accept connections from other machines
 
 # -- CI-1T API --
 # Get your key at https://collapseindex.org/dashboard
@@ -65,3 +65,29 @@ credits:
   low_warning: 100
   # Check balance every N rounds (0 = disabled)
   check_interval: 10
+
+# -- Multi-Agent Coordination (experimental) --
+# Track causal relationships across agents and enforce cross-agent governance.
+# multi_agent:
+#   enabled: true
+#   cascade: true              # Propagate instability to upstream agents
+#   influence_gating: true     # Block cross-agent actions above triggering agent's AL
+#   cascade_decay: 0.5         # Attenuation per hop (50%)
+#   cascade_max_hops: 4        # Max causal chain depth
+#   causal_edge_ttl: 600       # Seconds before causal edges expire
+
+# -- CI-C1: Curiosity Engine (experimental) --
+# Background pattern discovery across agent behavioral trajectories.
+# Uses 8-dimensional fingerprints + structural similarity (shape + magnitude).
+# curiosity:
+#   enabled: true
+#   cycle_interval: 60         # Seconds between curiosity cycles
+#   window_size: 10            # Episodes per behavioral fingerprint
+#   history_depth: 20          # Past windows to keep per agent
+#   similarity_threshold: 0.75 # Minimum similarity to surface a discovery
+#   cooldown_cycles: 5         # Cycles before re-reporting same match
+
+# -- OpenRouter (optional, for demo scripts) --
+# Used by scripts/demo_openrouter.py to test live LLMs through Umbra.
+# Can also use OPENROUTER_API_KEY env var instead.
+# openrouter_key: "sk-or-..."

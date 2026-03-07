@@ -30,6 +30,7 @@ import httpx
 from . import __version__
 from .alerts import AlertDispatcher
 from .config import UmbraConfig, sanitize_agent_name
+from .curiosity import CuriosityEngine
 from .multi import (
     CausalGraph, InfluenceGate, compute_cascade_penalties, compute_consensus_al,
 )
@@ -106,6 +107,15 @@ class UmbraServer:
         self.multi_enabled = config.multi_agent.enabled
         self.causal_graph = CausalGraph(edge_ttl=config.multi_agent.causal_edge_ttl)
         self._multi_cfg = config.multi_agent
+        self.curiosity: CuriosityEngine | None = None
+        if config.curiosity.enabled:
+            self.curiosity = CuriosityEngine(
+                cycle_interval=config.curiosity.cycle_interval,
+                window_size=config.curiosity.window_size,
+                history_depth=config.curiosity.history_depth,
+                similarity_threshold=config.curiosity.similarity_threshold,
+                cooldown_cycles=config.curiosity.cooldown_cycles,
+            )
         self._start_time = time.time()
         self._request_count = 0
         self._credit_warning_sent = False
@@ -126,6 +136,7 @@ class UmbraServer:
             Route("/episodes", self._handle_episodes, methods=["GET"]),
             Route("/consensus", self._handle_consensus, methods=["POST"]),
             Route("/causal/{agent:path}", self._handle_causal, methods=["GET"]),
+            Route("/discoveries", self._handle_discoveries, methods=["GET"]),
         ]
 
         app = Starlette(
@@ -142,9 +153,13 @@ class UmbraServer:
             "umbra started (policy=%s, episode_size=%d, api=%s)",
             self.config.policy, self.config.episode_size, self.config.api_url,
         )
+        if self.curiosity:
+            await self.curiosity.start()
 
     async def _on_shutdown(self) -> None:
         logger.info("Shutting down, cleaning up sessions...")
+        if self.curiosity:
+            await self.curiosity.stop()
         await self.sessions.shutdown()
 
     # -- POST /check --
@@ -231,6 +246,10 @@ class UmbraServer:
         if self.multi_enabled and self._multi_cfg.cascade:
             asyncio.create_task(self._cascade_propagate(agent, result.ci_raw))
 
+        # CI-C1: record episode for curiosity engine
+        if self.curiosity:
+            self.curiosity.record(agent, result.ci, result.al, result.ghost_suspect)
+
         # Log decision + episode
         result_dict = result.to_dict()
         self._decision_log.append({
@@ -290,6 +309,10 @@ class UmbraServer:
                 if round_result is not None:
                     result = self._apply_policy(agent, round_result)
                     await self._maybe_alert(result)
+                    if self.curiosity:
+                        self.curiosity.record(
+                            agent, result.ci, result.al, result.ghost_suspect,
+                        )
             except Exception as e:
                 logger.error("Background check failed for %s: %s", agent, e)
 
@@ -323,7 +346,7 @@ class UmbraServer:
     # -- GET /status/{agent} --
 
     async def _handle_agent_status(self, request: Request) -> Response:
-        agent = request.path_params["agent"]
+        agent = sanitize_agent_name(request.path_params["agent"])
         status = await self.sessions.get_status(agent)
         if not status:
             return _error(404, f"No active session for agent '{agent}'")
@@ -342,11 +365,13 @@ class UmbraServer:
     # -- DELETE /sessions/{agent} --
 
     async def _handle_delete_session(self, request: Request) -> Response:
-        agent = request.path_params["agent"]
+        agent = sanitize_agent_name(request.path_params["agent"])
         deleted = await self.sessions.delete_session(agent)
         if not deleted:
             return _error(404, f"No active session for agent '{agent}'")
         self.causal_graph.clear_agent(agent)
+        if self.curiosity:
+            self.curiosity.clear_agent(agent)
         return JSONResponse({"deleted": True, "agent": agent})
 
     # -- GET /decisions --
@@ -354,6 +379,8 @@ class UmbraServer:
     async def _handle_decisions(self, request: Request) -> Response:
         """Return recent policy decisions, optionally filtered by agent."""
         agent_filter = request.query_params.get("agent")
+        if agent_filter:
+            agent_filter = sanitize_agent_name(agent_filter)
         items = list(self._decision_log)
         if agent_filter:
             items = [d for d in items if d["agent"] == agent_filter]
@@ -366,6 +393,8 @@ class UmbraServer:
     async def _handle_episodes(self, request: Request) -> Response:
         """Return recent episode results, optionally filtered by agent."""
         agent_filter = request.query_params.get("agent")
+        if agent_filter:
+            agent_filter = sanitize_agent_name(agent_filter)
         items = list(self._episode_log)
         if agent_filter:
             items = [d for d in items if d["agent"] == agent_filter]
@@ -414,7 +443,7 @@ class UmbraServer:
 
     async def _handle_causal(self, request: Request) -> Response:
         """Return the upstream causal chain for an agent."""
-        agent = request.path_params["agent"]
+        agent = sanitize_agent_name(request.path_params["agent"])
         upstream = self.causal_graph.get_upstream(agent)
         return JSONResponse({
             "agent": agent,
@@ -422,6 +451,25 @@ class UmbraServer:
                 {"agent": name, "hops": hops}
                 for name, hops in upstream
             ],
+        })
+
+    # -- GET /discoveries --
+
+    async def _handle_discoveries(self, request: Request) -> Response:
+        """Return recent curiosity discoveries, optionally filtered by agent."""
+        if not self.curiosity:
+            return _error(404, "Curiosity engine is not enabled")
+        agent = request.query_params.get("agent")
+        if agent:
+            agent = sanitize_agent_name(agent)
+        try:
+            limit = min(int(request.query_params.get("limit", "50")), 200)
+        except (ValueError, TypeError):
+            limit = 50
+        discoveries = self.curiosity.get_discoveries(limit=limit, agent=agent)
+        return JSONResponse({
+            "discoveries": discoveries,
+            "cycle_count": self.curiosity.cycle_count,
         })
 
     # -- Internal helpers --
@@ -442,8 +490,11 @@ class UmbraServer:
             if length > MAX_BODY_SIZE:
                 return _error(413, "Request body too large")
 
+        raw = await request.body()
+        if len(raw) > MAX_BODY_SIZE:
+            return _error(413, "Request body too large")
         try:
-            body = await request.json()
+            body = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
             return _error(400, "Invalid JSON body")
         except Exception:
