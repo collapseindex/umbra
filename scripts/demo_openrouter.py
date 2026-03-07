@@ -18,7 +18,8 @@ import asyncio
 import json
 import os
 import sys
-import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import yaml
 import httpx
@@ -27,6 +28,9 @@ UMBRA_URL = "http://127.0.0.1:8400"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "anthropic/claude-sonnet-4"
 AGENT_NAME = "sonnet-coder"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+REPORT_DIR = ROOT_DIR / "data" / "generated"
+Q16_MAX = 65535
 
 # Tools the LLM can "call" -- each maps to an Umbra action
 TOOLS = [
@@ -120,6 +124,50 @@ TASKS = [
 ]
 
 
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def _slugify(value: str) -> str:
+    chars = [ch.lower() if ch.isalnum() else "_" for ch in value]
+    return "".join(chars).strip("_") or "demo"
+
+
+def _parse_tool_args(raw_args: str) -> dict | str:
+    try:
+        return json.loads(raw_args)
+    except json.JSONDecodeError:
+        return raw_args
+
+
+def _status_summary(status: dict) -> dict:
+    episode = status.get("last_episode", {})
+    ci_raw = episode.get("ci_out")
+    ci_ema_raw = episode.get("ci_ema_out")
+    return {
+        "agent": status.get("agent", AGENT_NAME),
+        "session_id": status.get("session_id"),
+        "round_count": status.get("round_count", 0),
+        "buffered_scores": status.get("buffered_scores", 0),
+        "credits_remaining": status.get("credits_remaining", -1),
+        "ci": round(ci_raw / Q16_MAX, 4) if isinstance(ci_raw, int) else None,
+        "ci_ema": round(ci_ema_raw / Q16_MAX, 4) if isinstance(ci_ema_raw, int) else None,
+        "al": episode.get("al_out"),
+        "ghost_suspect": episode.get("ghost_suspect"),
+        "ghost_confirmed": episode.get("ghost_confirmed"),
+        "last_episode": episode,
+    }
+
+
+def _write_report(report: dict) -> Path:
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = REPORT_DIR / (
+        f"{_utc_timestamp()}_openrouter_demo_{_slugify(MODEL)}_{_slugify(AGENT_NAME)}.json"
+    )
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report_path
+
+
 async def check_umbra(client: httpx.AsyncClient, action: str) -> dict:
     """Gate a tool call through Umbra."""
     resp = await client.post(
@@ -167,6 +215,14 @@ async def run_agent_loop(
     print(f"  Prompt: {task['prompt'][:80]}...")
     print()
 
+    task_report = {
+        "label": task["label"],
+        "prompt": task["prompt"],
+        "turns": [],
+        "aborted": False,
+        "final_reply": None,
+    }
+
     messages = [
         {"role": "system", "content": "You are a helpful coding assistant with access to tools."},
         {"role": "user", "content": task["prompt"]},
@@ -191,6 +247,7 @@ async def run_agent_loop(
         tool_calls = message.get("tool_calls", [])
         if tool_calls:
             messages.append(message)  # add assistant message with tool_calls
+            abort_task = False
 
             for tc in tool_calls:
                 func = tc.get("function", {})
@@ -217,18 +274,32 @@ async def run_agent_loop(
                 # Simulate tool response based on gate decision
                 if status in ("allow", "buffered"):
                     tool_response = f"[Simulated] {tool_name} executed successfully."
-                elif status == "softblock":
+                elif status == "warn":
                     tool_response = (
-                        f"[UMBRA SOFTBLOCK] Action '{tool_name}' was soft-blocked. "
-                        f"CI={ci}, AL={al}. The agent's instability score is elevated. "
-                        "Proceed with caution or try a safer approach."
+                        f"[UMBRA WARN] Action '{tool_name}' executed with warning. "
+                        f"CI={ci}, AL={al}. The agent should proceed carefully."
                     )
+                elif status == "gate":
+                    tool_response = (
+                        f"[UMBRA GATE] Action '{tool_name}' requires human approval. "
+                        f"CI={ci}, AL={al}. Stop and wait for review."
+                    )
+                    abort_task = True
                 else:
                     tool_response = (
                         f"[UMBRA BLOCKED] Action '{tool_name}' was hard-blocked. "
                         f"CI={ci}, AL={al}. This action is not allowed at the current "
                         "authority level. Try a different approach."
                     )
+                    abort_task = True
+
+                task_report["turns"].append({
+                    "turn": turn + 1,
+                    "tool": tool_name,
+                    "arguments": _parse_tool_args(tool_args),
+                    "gate": gate_result,
+                    "tool_response": tool_response,
+                })
 
                 messages.append({
                     "role": "tool",
@@ -236,17 +307,36 @@ async def run_agent_loop(
                     "content": tool_response,
                 })
 
+                if abort_task:
+                    task_report["aborted"] = True
+                    print(f"  [Turn {turn + 1}] Task stopped after {status.upper()} decision")
+                    break
+
+            if abort_task:
+                break
+
         elif message.get("content"):
             # LLM gave a text reply (no tool calls) -- done
             content = message["content"]
             preview = content[:120].replace("\n", " ")
             print(f"  [Turn {turn + 1}] LLM reply: {preview}...")
+            task_report["turns"].append({
+                "turn": turn + 1,
+                "reply": content,
+            })
+            task_report["final_reply"] = content
             break
         else:
             print(f"  [Turn {turn + 1}] Empty message (finish_reason={finish_reason})")
+            task_report["turns"].append({
+                "turn": turn + 1,
+                "empty_message": True,
+                "finish_reason": finish_reason,
+            })
             break
 
     print()
+    return task_report
 
 
 def _load_openrouter_key() -> str:
@@ -270,6 +360,14 @@ async def run_demo():
         print("Or set OPENROUTER_API_KEY env var.")
         sys.exit(1)
 
+    report = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "umbra_url": UMBRA_URL,
+        "model": MODEL,
+        "agent": AGENT_NAME,
+        "tasks": [],
+    }
+
     print("=" * 60)
     print("OPENROUTER + UMBRA: LIVE LLM AGENT DEMO")
     print(f"Model: {MODEL}")
@@ -282,24 +380,28 @@ async def run_demo():
             resp = await client.get(f"{UMBRA_URL}/health")
             health = resp.json()
             print(f"\nUmbra {health.get('version', '?')} running ({health.get('policy', '?')} mode)")
+            report["health"] = health
         except httpx.ConnectError:
             print(f"\nCannot connect to Umbra at {UMBRA_URL}")
             print("Start it first: umbra serve")
             sys.exit(1)
 
         # Check curiosity
-        resp = await client.get(f"{UMBRA_URL}/discoveries")
+        resp = await client.get(f"{UMBRA_URL}/discoveries", params={"agent": AGENT_NAME, "limit": 20})
         if resp.status_code == 200:
             print("Curiosity engine: active")
+            report["curiosity_enabled"] = True
         else:
             print("Curiosity engine: disabled (enable in umbra.yml for pattern detection)")
+            report["curiosity_enabled"] = False
 
         # Run each task
         for i, task in enumerate(TASKS, 1):
             print(f"\n{'=' * 60}")
             print(f"TASK {i}/{len(TASKS)}")
             print("=" * 60)
-            await run_agent_loop(client, api_key, task)
+            task_report = await run_agent_loop(client, api_key, task)
+            report["tasks"].append(task_report)
             await asyncio.sleep(1)
 
         # Wait for curiosity cycle
@@ -307,12 +409,15 @@ async def run_demo():
         print("Waiting for curiosity cycle to analyze patterns...")
         print("=" * 60)
 
+        report["discoveries"] = []
         for attempt in range(12):
             await asyncio.sleep(5)
-            resp = await client.get(f"{UMBRA_URL}/discoveries")
+            resp = await client.get(f"{UMBRA_URL}/discoveries", params={"agent": AGENT_NAME, "limit": 20})
             if resp.status_code == 200:
                 data = resp.json()
                 discoveries = data.get("discoveries", [])
+                report["discoveries"] = discoveries
+                report["curiosity_cycle_count"] = data.get("cycle_count")
                 if discoveries:
                     print(f"\n  {len(discoveries)} discovery(ies):\n")
                     for d in discoveries:
@@ -327,15 +432,45 @@ async def run_demo():
         print("=" * 60)
 
         resp = await client.get(f"{UMBRA_URL}/status/{AGENT_NAME}")
+        decisions_resp = await client.get(f"{UMBRA_URL}/decisions", params={"agent": AGENT_NAME})
+        episodes_resp = await client.get(f"{UMBRA_URL}/episodes", params={"agent": AGENT_NAME})
+
+        report["final_status_http"] = {
+            "status_code": resp.status_code,
+            "body": resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text,
+        }
+        report["final_decisions"] = decisions_resp.json() if decisions_resp.status_code == 200 else {
+            "status_code": decisions_resp.status_code,
+            "body": decisions_resp.text,
+        }
+        report["final_episodes"] = episodes_resp.json() if episodes_resp.status_code == 200 else {
+            "status_code": episodes_resp.status_code,
+            "body": episodes_resp.text,
+        }
+
         if resp.status_code == 200:
             status = resp.json()
-            print(f"  Agent: {AGENT_NAME}")
-            print(f"  CI:    {status.get('ci', '?')}")
-            print(f"  AL:    {status.get('al', '?')}")
-            print(f"  Ghost: {status.get('ghost_confirmed', '?')}")
-            print(f"  Rounds: {status.get('round', '?')}")
+            summary = _status_summary(status)
+            report["final_status"] = summary
+            print(f"  Agent:   {summary['agent']}")
+            print(f"  Session: {summary.get('session_id', '?')}")
+            print(f"  Rounds:  {summary.get('round_count', 0)}")
+            print(f"  Buffer:  {summary.get('buffered_scores', 0)}")
+            print(f"  CI:      {summary.get('ci', '?')}")
+            print(f"  AL:      {summary.get('al', '?')}")
+            print(f"  Ghost:   {summary.get('ghost_confirmed', '?')}")
         else:
-            print(f"  No status found for {AGENT_NAME}")
+            print(f"  Status request failed: HTTP {resp.status_code}")
+            print(f"  Body: {resp.text[:200]}")
+
+        decisions = report["final_decisions"].get("decisions", []) if isinstance(report["final_decisions"], dict) else []
+        episodes = report["final_episodes"].get("episodes", []) if isinstance(report["final_episodes"], dict) else []
+        print(f"  Decisions logged: {len(decisions)}")
+        print(f"  Episodes logged:  {len(episodes)}")
+
+        report["finished_at"] = datetime.now(timezone.utc).isoformat()
+        report_path = _write_report(report)
+        print(f"\nReport saved to: {report_path}")
 
         # Cleanup
         print(f"\n{'=' * 60}")

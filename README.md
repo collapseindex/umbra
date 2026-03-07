@@ -5,7 +5,7 @@
   <br />
 </p>
 
-**Version:** 0.5.0 | **License:** [ELv2](LICENSE) | **Last Updated:** March 6, 2026
+**Version:** 0.5.0 | **License:** [ELv2](LICENSE) | **Last Updated:** March 7, 2026
 
 ---
 
@@ -67,6 +67,16 @@ umbra serve
 ```
 
 That's it. Umbra is now listening on `http://localhost:8400`.
+
+## Live Demo
+
+Want to see a real LLM agent go through Umbra's gate? Add `openrouter_key` to `umbra.yml`, start Umbra, then run:
+
+```bash
+python scripts/demo_openrouter.py
+```
+
+The demo runs a Claude Sonnet coding agent through three tasks, shows the gate decision for each tool call, and saves a timestamped JSON report in `data/generated/`.
 
 ---
 
