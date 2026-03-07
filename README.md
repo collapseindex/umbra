@@ -1,7 +1,7 @@
 # Umbra
 
 <p align="center">
-  <img src="moon.png" alt="Umbra" width="900" />
+  <img src="https://raw.githubusercontent.com/collapseindex/umbra/main/moon.png" alt="Umbra" width="900" />
   <br />
 </p>
 
@@ -23,7 +23,7 @@ Both are disabled by default and can be turned on in `umbra.yml`.
 It works with any agent framework (CrewAI, AutoGen, LangGraph, OpenClaw, Claude Code, custom) -- if your agent can make an HTTP call, it can use Umbra.
 
 <p align="center">
-  <img src="flow.png" alt="Umbra architecture" width="900" />
+  <img src="https://raw.githubusercontent.com/collapseindex/umbra/main/flow.png" alt="Umbra architecture" width="900" />
 </p>
 
 ## 30-Second Integration
